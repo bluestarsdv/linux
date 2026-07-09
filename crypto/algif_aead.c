@@ -174,7 +174,12 @@ static int _aead_recvmsg(struct socket *sock, struct msghdr *msg,
 		goto free;
 	}
 	sg_init_table(areq->tsgl, areq->tsgl_entries);
-	af_alg_pull_tsgl(sk, processed, areq->tsgl);
+	err = af_alg_pull_tsgl(sk, processed, areq->tsgl, ctx->aead_assoclen);
+	if (err < 0) {
+		sock_kfree_s(sk, areq->tsgl, array_size(sizeof(*areq->tsgl), areq->tsgl_entries));
+		areq->tsgl = NULL;
+		goto free;
+	}
 	tsgl_src = areq->tsgl;
 
 	/*
@@ -189,7 +194,9 @@ static int _aead_recvmsg(struct socket *sock, struct msghdr *msg,
 	/* Use the RX SGL as source (and destination) for crypto op. */
 	rsgl_src = areq->first_rsgl.sgl.sgt.sgl;
 
-	memcpy_sglist(rsgl_src, tsgl_src, ctx->aead_assoclen);
+	if (ctx->aead_assoclen) {
+		memcpy_sglist(rsgl_src, tsgl_src, ctx->aead_assoclen);
+	}
 
 	/* Initialize the crypto operation */
 	aead_request_set_crypt(&areq->cra_u.aead_req, tsgl_src,
@@ -205,6 +212,10 @@ static int _aead_recvmsg(struct socket *sock, struct msghdr *msg,
 			crypto_aead_encrypt(&areq->cra_u.aead_req) :
 			crypto_aead_decrypt(&areq->cra_u.aead_req),
 			&ctx->wait);
+
+	if (err) {
+		af_alg_pull_tsgl(sk, processed, NULL, 0);
+	}
 
 free:
 	af_alg_free_resources(areq);
@@ -371,7 +382,7 @@ static void aead_sock_destruct(struct sock *sk)
 	struct crypto_aead *tfm = pask->private;
 	unsigned int ivlen = crypto_aead_ivsize(tfm);
 
-	af_alg_pull_tsgl(sk, ctx->used, NULL);
+	af_alg_pull_tsgl(sk, ctx->used, NULL, 0);
 	sock_kzfree_s(sk, ctx->iv, ivlen);
 	sock_kfree_s(sk, ctx, ctx->len);
 	af_alg_release_parent(sk);
